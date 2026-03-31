@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  load-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      python-versions: ${{ steps.read.outputs.versions }}
+      latest-python: ${{ steps.read.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read python-versions.json
+        id: read
+        run: |
+          VERSIONS=$(cat python-versions.json)
+          echo "versions=${VERSIONS}" >> "$GITHUB_OUTPUT"
+          LATEST=$(echo "$VERSIONS" | python3 -c "import json,sys; print(max(json.load(sys.stdin)))")
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: load-versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ needs.load-versions.outputs.latest-python }}
+      - run: uv sync --group dev
+      - run: uv run ruff check src/ tests/
+      - run: uv run ruff format --check src/ tests/
+
+  typecheck:
+    needs: load-versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ needs.load-versions.outputs.latest-python }}
+      - run: uv sync --group dev
+      - run: uv run ty check src/ tests/
+
+  test:
+    needs: load-versions
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON(needs.load-versions.outputs.python-versions) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --group dev
+      - run: uv run pytest tests/ -v
+
+  docker-build:
+    needs: [load-versions, lint, typecheck, test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ${{ fromJSON(needs.load-versions.outputs.python-versions) }}
+        distro: ["slim", "alpine"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          build-args: |
+            BASE_IMAGE=python:${{ matrix.python }}-${{ matrix.distro }}
+          platforms: linux/amd64,linux/arm64
+          tags: github-token:${{ matrix.python }}-${{ matrix.distro }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

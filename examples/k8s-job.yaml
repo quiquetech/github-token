@@ -1,0 +1,66 @@
+# Kubernetes Job that generates a GitHub token and uses it to dispatch a
+# repository event. Replace the inline bash JWT generation with the
+# github-token container as an init container.
+#
+# Prerequisites:
+#   - A Secret named "github-app-secret" containing:
+#       GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dispatch-event
+  namespace: default
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: get-token
+          image: enponsba/github-token:latest
+          env:
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: github-app-secret
+                  key: GITHUB_APP_ID
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: github-app-secret
+                  key: GITHUB_APP_INSTALLATION_ID
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: github-app-secret
+                  key: GITHUB_APP_PRIVATE_KEY
+            - name: GITHUB_TOKEN_OUTPUT
+              value: "file:/shared/token"
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+
+      containers:
+        - name: use-token
+          image: alpine:3
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              TOKEN=$(cat /shared/token)
+              apk add --no-cache curl
+              curl -sfL -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/OWNER/REPO/dispatches" \
+                -d '{"event_type":"example"}'
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+              readOnly: true
+
+      volumes:
+        - name: shared
+          emptyDir: {}
+
+      restartPolicy: Never
+  backoffLimit: 2

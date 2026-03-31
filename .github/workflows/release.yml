@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: enponsba/github-token
+
+jobs:
+  load-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      python-versions: ${{ steps.read.outputs.versions }}
+      latest-python: ${{ steps.read.outputs.latest }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read python-versions.json
+        id: read
+        run: |
+          VERSIONS=$(cat python-versions.json)
+          echo "versions=${VERSIONS}" >> "$GITHUB_OUTPUT"
+          LATEST=$(echo "$VERSIONS" | python3 -c "import json,sys; print(max(json.load(sys.stdin)))")
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: load-versions
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ${{ fromJSON(needs.load-versions.outputs.python-versions) }}
+        distro: ["slim", "alpine"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Generate tags
+        id: tags
+        env:
+          LATEST_PYTHON: ${{ needs.load-versions.outputs.latest-python }}
+        run: |
+          IMAGE="${IMAGE_NAME}"
+          VERSION="${{ github.ref_name }}"
+          PY="${{ matrix.python }}"
+          DISTRO="${{ matrix.distro }}"
+
+          TAGS="${IMAGE}:${PY}-${DISTRO}"
+          TAGS="${TAGS},${IMAGE}:${PY}-${DISTRO}-${VERSION}"
+
+          # Bare python version tag points to slim
+          if [[ "${DISTRO}" == "slim" ]]; then
+            TAGS="${TAGS},${IMAGE}:${PY}"
+            TAGS="${TAGS},${IMAGE}:${PY}-${VERSION}"
+          fi
+
+          # Latest tag points to newest python + slim
+          if [[ "${PY}" == "${LATEST_PYTHON}" && "${DISTRO}" == "slim" ]]; then
+            TAGS="${TAGS},${IMAGE}:latest"
+            TAGS="${TAGS},${IMAGE}:${VERSION}"
+          fi
+
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          build-args: |
+            BASE_IMAGE=python:${{ matrix.python }}-${{ matrix.distro }}
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.title=github-token
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+  update-dockerhub-description:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: enponsba/github-token
+          readme-filepath: DOCKERHUB.md
+          short-description: "Generate short-lived GitHub App installation tokens from a minimal Docker container"

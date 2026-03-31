@@ -1,0 +1,51 @@
+name: Python EOL Check
+
+on:
+  schedule:
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-eol:
+    runs-on: ubuntu-latest
+    outputs:
+      flagged: ${{ steps.eol.outputs.flagged }}
+      has-eol: ${{ steps.eol.outputs.has-eol }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check EOL status
+        id: eol
+        uses: ./.github/actions/python-eol-check
+
+  open-issues:
+    needs: check-eol
+    if: fromJSON(needs.check-eol.outputs.has-eol)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        entry: ${{ fromJSON(needs.check-eol.outputs.flagged) }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check for existing issue
+        id: existing
+        run: |
+          COUNT=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "${{ matrix.entry.title }}" --json number --jq 'length')
+          echo "found=${COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: Create issue
+        if: steps.existing.outputs.found == '0'
+        env:
+          TITLE: ${{ matrix.entry.title }}
+          BODY: ${{ matrix.entry.body }}
+          LABELS: ${{ matrix.entry.labels }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label "$LABELS"

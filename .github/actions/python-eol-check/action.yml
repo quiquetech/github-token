@@ -1,0 +1,40 @@
+name: Python EOL Check
+description: >
+  Check supported Python versions against endoflife.date. Outputs which
+  versions are EOL or approaching EOL as structured JSON with ready-to-use
+  title, body, and labels for issue or PR creation actions.
+
+inputs:
+  versions-file:
+    description: Path to a JSON array of supported Python version strings
+    required: false
+    default: python-versions.json
+  warn-days-before:
+    description: Number of days before EOL to start flagging
+    required: false
+    default: "30"
+
+outputs:
+  flagged:
+    description: >
+      JSON array of flagged versions. Each entry contains: version, eol_date,
+      status ("eol"|"approaching"), title, body, and labels -- ready to pass
+      directly to an issue creation action.
+    value: ${{ steps.check.outputs.flagged }}
+  has-eol:
+    description: '"true" if any version is EOL or approaching, "false" otherwise'
+    value: ${{ steps.check.outputs.has-eol }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+
+    - name: Check EOL status
+      id: check
+      shell: bash
+      env:
+        INPUT_VERSIONS_FILE: ${{ inputs.versions-file }}
+        INPUT_WARN_DAYS_BEFORE: ${{ inputs.warn-days-before }}
+      run: uv run ${{ github.action_path }}/check_eol.py
