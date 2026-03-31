@@ -11,12 +11,25 @@ from pathlib import Path
 _DEFAULT_KEY_PATH = "/etc/github/GITHUB_APP_PRIVATE_KEY"
 
 
+def _mask_value(value: str, visible: int = 4) -> str:
+    """Return a masked version showing only the first *visible* characters."""
+    if len(value) <= visible:
+        return "***"
+    return value[:visible] + "***"
+
+
+def _mask_token_in_ci(token: str) -> None:
+    """Emit a GitHub Actions masking command so the token is redacted from logs."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::add-mask::{token}", file=sys.stderr)
+
+
 @dataclass(frozen=True)
 class Config:
     """Resolved runtime configuration."""
 
     app_id: str
-    installation_id: str
+    installation_id: str | None
     private_key: str
     permissions: dict[str, str] = field(default_factory=dict)
     repositories: list[str] = field(default_factory=list)
@@ -36,8 +49,18 @@ def resolve_config() -> Config:
     errors: list[str] = []
     if not app_id:
         errors.append("GITHUB_APP_ID is required")
-    if not installation_id:
-        errors.append("GITHUB_APP_INSTALLATION_ID is required")
+    elif not app_id.isdigit():
+        errors.append(
+            f"GITHUB_APP_ID must be a numeric App ID (e.g. '123456'), "
+            f"got '{_mask_value(app_id)}'. "
+            f"This looks like a Client ID -- find the numeric App ID at "
+            f"https://github.com/settings/apps/<your-app>/edit"
+        )
+    if installation_id and not installation_id.isdigit():
+        errors.append(
+            f"GITHUB_APP_INSTALLATION_ID must be numeric (e.g. '12345678'), "
+            f"got '{_mask_value(installation_id)}'"
+        )
 
     private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY", "")
     key_path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH", _DEFAULT_KEY_PATH)
@@ -63,7 +86,7 @@ def resolve_config() -> Config:
 
     return Config(
         app_id=app_id,
-        installation_id=installation_id,
+        installation_id=installation_id or None,
         private_key=private_key,
         permissions=permissions,
         repositories=repositories,
@@ -77,9 +100,9 @@ def _parse_permissions(raw: str) -> dict[str, str]:
         return {}
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: GITHUB_TOKEN_PERMISSIONS is not valid JSON: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+    except json.JSONDecodeError:
+        print("ERROR: GITHUB_TOKEN_PERMISSIONS is not valid JSON", file=sys.stderr)
+        raise SystemExit(1) from None
     if not isinstance(parsed, dict):
         print("ERROR: GITHUB_TOKEN_PERMISSIONS must be a JSON object", file=sys.stderr)
         raise SystemExit(1)
@@ -110,6 +133,7 @@ def _parse_output(raw: str) -> tuple[str, str | None]:
 
 def write_output(token: str, config: Config) -> None:
     """Write the token according to the configured output mode."""
+    _mask_token_in_ci(token)
     if config.output_mode == "stdout":
         print(token)
     elif config.output_mode == "file":

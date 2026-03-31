@@ -29,7 +29,7 @@ jobs:
       matrix:
         entry: ${{ fromJSON(needs.check-eol.outputs.flagged) }}
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
     steps:
       - name: Check for existing issue
         id: existing

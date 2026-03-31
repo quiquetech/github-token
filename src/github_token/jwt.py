@@ -23,7 +23,17 @@ def create_jwt(app_id: str, private_key_pem: str, duration: int = 600) -> str:
 
     Returns:
         The signed JWT string.
+
+    Raises:
+        ValueError: If *app_id* or *private_key_pem* are empty/invalid.
     """
+    if not app_id or not app_id.strip():
+        raise ValueError("app_id must be a non-empty string")
+    if not private_key_pem or not private_key_pem.strip():
+        raise ValueError(
+            "private_key_pem is empty -- provide a PEM-encoded RSA private key (PKCS#1 or PKCS#8)"
+        )
+
     now = int(time.time())
     header = {"alg": "RS256", "typ": "JWT"}
     payload = {"iat": now - 60, "exp": now + duration, "iss": app_id}
@@ -56,14 +66,50 @@ def _b64url(data: bytes) -> str:
 
 
 def _parse_rsa_private_key(pem: str) -> tuple[int, int]:
-    """Extract (n, d) from a PEM RSA private key (PKCS#1 or PKCS#8)."""
-    lines = [line for line in pem.strip().splitlines() if not line.startswith("-----")]
-    der = base64.b64decode("".join(lines))
+    """Extract (n, d) from a PEM RSA private key (PKCS#1 or PKCS#8).
 
-    if b"PRIVATE KEY" in pem.encode() and b"RSA PRIVATE KEY" not in pem.encode():
-        der = _unwrap_pkcs8(der)
+    Raises:
+        ValueError: If the PEM data is missing headers, is not valid base64,
+            or does not contain a recognisable RSA key structure.
+    """
+    # Env vars commonly carry PEM keys with literal two-char "\n" instead of
+    # real newlines.  Normalise before anything else.
+    normalized = pem.replace("\\n", "\n").strip()
 
-    return _parse_pkcs1_der(der)
+    if "PRIVATE KEY" not in normalized:
+        raise ValueError(
+            "Private key does not contain PEM headers "
+            "(expected '-----BEGIN RSA PRIVATE KEY-----' or '-----BEGIN PRIVATE KEY-----'). "
+            "Ensure the full PEM file contents are provided."
+        )
+
+    lines = [line for line in normalized.splitlines() if not line.startswith("-----")]
+    b64_payload = "".join(lines)
+    if not b64_payload:
+        raise ValueError("Private key PEM contains headers but no key data")
+
+    try:
+        der = base64.b64decode(b64_payload)
+    except Exception as exc:
+        raise ValueError(f"Private key PEM contains invalid base64 data: {exc}") from exc
+
+    if len(der) < 2:
+        raise ValueError(
+            f"Private key DER data is too short ({len(der)} bytes) -- "
+            "the key file is likely truncated or corrupted"
+        )
+
+    try:
+        if "RSA PRIVATE KEY" not in normalized:
+            der = _unwrap_pkcs8(der)
+        return _parse_pkcs1_der(der)
+    except ValueError:
+        raise
+    except (IndexError, TypeError) as exc:
+        raise ValueError(
+            f"Failed to parse RSA private key structure: {exc}. "
+            "Verify that the key is a valid PKCS#1 or PKCS#8 RSA private key."
+        ) from exc
 
 
 def _unwrap_pkcs8(der: bytes) -> bytes:
@@ -90,16 +136,30 @@ def _parse_pkcs1_der(der: bytes) -> tuple[int, int]:
 def _read_asn1_element(data: bytes | memoryview, offset: int) -> tuple[memoryview, int]:
     """Read one ASN.1 TLV element and return (value_bytes, new_offset)."""
     view = memoryview(data)
-    tag_end = offset + 1  # noqa: F841
+    if offset + 2 > len(view):
+        raise ValueError(
+            f"Malformed ASN.1: need at least 2 bytes at offset {offset}, "
+            f"but key data is only {len(view)} bytes"
+        )
     length_byte = view[offset + 1]
     if length_byte & 0x80 == 0:
         length = length_byte
         value_start = offset + 2
     else:
         num_len_bytes = length_byte & 0x7F
+        if offset + 2 + num_len_bytes > len(view):
+            raise ValueError(
+                f"Malformed ASN.1: extended length field requires {num_len_bytes} bytes "
+                f"at offset {offset + 2}, but only {len(view) - offset - 2} available"
+            )
         length = int.from_bytes(view[offset + 2 : offset + 2 + num_len_bytes], "big")
         value_start = offset + 2 + num_len_bytes
     value_end = value_start + length
+    if value_end > len(view):
+        raise ValueError(
+            f"Malformed ASN.1: element at offset {offset} claims {length} bytes "
+            f"but only {len(view) - value_start} remain -- key data may be truncated"
+        )
     return view[value_start:value_end], value_end
 
 

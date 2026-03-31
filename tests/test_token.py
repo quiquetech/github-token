@@ -11,10 +11,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from github_token.token import get_installation_token
+from github_token.token import get_installation_token, list_installations
 
 
-def _make_response(body: dict[str, Any], status: int = 200) -> MagicMock:
+def _make_response(body: Any, status: int = 200) -> MagicMock:
     """Create a mock HTTPResponse-like context manager."""
     data = json.dumps(body).encode()
     mock = MagicMock()
@@ -107,3 +107,57 @@ class TestGetInstallationToken:
 
         with pytest.raises(RuntimeError, match="Failed to reach GitHub API"):
             get_installation_token("jwt", "1")
+
+
+class TestListInstallations:
+    @patch("github_token.token.urllib.request.urlopen")
+    def test_returns_installations(self, mock_urlopen: MagicMock) -> None:
+        payload = [
+            {"id": 111, "account": {"login": "org-a"}},
+            {"id": 222, "account": {"login": "org-b"}},
+        ]
+        mock_urlopen.return_value = _make_response(payload)
+
+        result = list_installations("jwt-value")
+        assert len(result) == 2
+        assert result[0]["id"] == 111
+        assert result[1]["account"]["login"] == "org-b"
+
+        request = mock_urlopen.call_args[0][0]
+        assert request.full_url.endswith("/app/installations")
+        assert request.get_method() == "GET"
+
+    @patch("github_token.token.urllib.request.urlopen")
+    def test_returns_empty_list(self, mock_urlopen: MagicMock) -> None:
+        mock_urlopen.return_value = _make_response([])
+
+        result = list_installations("jwt-value")
+        assert result == []
+
+    @patch("github_token.token.urllib.request.urlopen")
+    def test_raises_on_http_error(self, mock_urlopen: MagicMock) -> None:
+        error_body = BytesIO(b'{"message":"Bad credentials"}')
+        mock_response = MagicMock(spec=HTTPResponse)
+        mock_response.read.return_value = error_body.read()
+        exc = urllib.error.HTTPError(
+            url="https://api.github.com/...",
+            code=401,
+            msg="Unauthorized",
+            hdrs=MagicMock(),  # type: ignore[arg-type]
+            fp=mock_response,  # type: ignore[arg-type]
+        )
+        mock_urlopen.side_effect = exc
+
+        with pytest.raises(RuntimeError, match="GitHub API returned 401"):
+            list_installations("bad-jwt")
+
+    def test_raises_on_empty_jwt(self) -> None:
+        with pytest.raises(ValueError, match="jwt must be a non-empty string"):
+            list_installations("")
+
+    @patch("github_token.token.urllib.request.urlopen")
+    def test_raises_on_non_list_response(self, mock_urlopen: MagicMock) -> None:
+        mock_urlopen.return_value = _make_response({"unexpected": "object"})
+
+        with pytest.raises(RuntimeError, match="expected a list"):
+            list_installations("jwt")
