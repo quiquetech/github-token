@@ -16,7 +16,7 @@ jobs:
       flagged: ${{ steps.eol.outputs.flagged }}
       has-eol: ${{ steps.eol.outputs.has-eol }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check EOL status
         id: eol
         uses: ./.github/actions/python-eol-check
